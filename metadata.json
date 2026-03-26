@@ -1,0 +1,5 @@
+{
+  "name": "Video Compressor Pro",
+  "description": "A powerful, browser-based video compression tool using FFmpeg.wasm. Compress MP4 and other video formats directly in your browser with privacy.",
+  "requestFramePermissions": []
+}
