@@ -1,6 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { fetchFile, toBlobURL } from '@ffmpeg/util';
+import { fetchFile } from '@ffmpeg/util';
+import ffmpegWorkerUrl from '@ffmpeg/ffmpeg/worker?url';
+import coreJsUrl from '@ffmpeg/core?url';
+import coreWasmUrl from '@ffmpeg/core/wasm?url';
 import { 
   Upload, 
   Settings, 
@@ -44,6 +47,7 @@ export default function App() {
   });
 
   const [downloadProgress, setDownloadProgress] = useState(0);
+  const [downloadDeterminate, setDownloadDeterminate] = useState(true);
   const [downloadLabel, setDownloadLabel] = useState('INITIALIZING...');
   const [isIsolated, setIsIsolated] = useState(true);
 
@@ -52,46 +56,19 @@ export default function App() {
   // --- FFmpeg Initialization ---
   useEffect(() => {
     setIsIsolated(window.crossOriginIsolated);
-    loadFFmpeg();
+    const ac = new AbortController();
+    loadFFmpeg(ac.signal);
+    return () => ac.abort();
   }, []);
 
-  const fetchWithProgress = async (url: string, label: string) => {
-    setDownloadLabel(`FETCHING_${label.toUpperCase()}...`);
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Failed to fetch ${label}`);
-    
-    const contentLength = response.headers.get('content-length');
-    if (!contentLength) {
-      const blob = await response.blob();
-      return URL.createObjectURL(blob);
-    }
-
-    const total = parseInt(contentLength, 10);
-    let loaded = 0;
-
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('ReadableStream not supported');
-
-    const chunks = [];
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      loaded += value.length;
-      setDownloadProgress(Math.round((loaded / total) * 100));
-    }
-
-    const blob = new Blob(chunks);
-    return URL.createObjectURL(blob);
-  };
-
-  const loadFFmpeg = async () => {
+  const loadFFmpeg = async (signal?: AbortSignal) => {
     setLoaded(false);
     setError(null);
     setDownloadProgress(0);
-    
+    setDownloadDeterminate(false);
+    setDownloadLabel('STARTING_ENGINE...');
+
     try {
-      const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
       const ffmpeg = new FFmpeg();
       ffmpegRef.current = ffmpeg;
 
@@ -99,29 +76,35 @@ export default function App() {
         console.log('[FFmpeg Log]', message);
       });
 
-      ffmpeg.on('progress', ({ progress }) => {
-        setProgress(Math.round(progress * 100));
+      ffmpeg.on('progress', ({ progress: p }) => {
+        setProgress(Math.round(p * 100));
       });
 
       const timeoutPromise = new Promise((_, reject) => 
         setTimeout(() => reject(new Error('FFmpeg load timeout (70s)')), 70000)
       );
 
-      const loadPromise = (async () => {
-        const coreURL = await fetchWithProgress(`${baseURL}/ffmpeg-core.js`, 'Core JS');
-        const wasmURL = await fetchWithProgress(`${baseURL}/ffmpeg-core.wasm`, 'WASM');
-        
-        await ffmpeg.load({
-          coreURL,
-          wasmURL,
-        });
-      })();
+      const loadPromise = ffmpeg.load(
+        {
+          classWorkerURL: ffmpegWorkerUrl,
+          coreURL: coreJsUrl,
+          wasmURL: coreWasmUrl,
+        },
+        { signal },
+      );
 
       await Promise.race([loadPromise, timeoutPromise]);
 
+      if (signal?.aborted) return;
+
       setFfmpeg(ffmpeg);
       setLoaded(true);
+      setDownloadDeterminate(true);
+      setDownloadProgress(100);
+      setDownloadLabel('READY');
     } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      if (signal?.aborted) return;
       console.error('Failed to load FFmpeg:', err);
       setError(
         err instanceof Error && err.message.includes('timeout')
@@ -218,7 +201,8 @@ export default function App() {
       await ffmpeg.exec(args);
 
       const data = await ffmpeg.readFile(outputName);
-      const url = URL.createObjectURL(new Blob([(data as Uint8Array).buffer], { type: 'video/mp4' }));
+      // `data` can be backed by a SharedArrayBuffer; using the Uint8Array avoids BlobPart typing issues.
+      const url = URL.createObjectURL(new Blob([data as Uint8Array], { type: 'video/mp4' }));
       setCompressedUrl(url);
     } catch (err) {
       console.error('Compression error:', err);
@@ -254,14 +238,25 @@ export default function App() {
             <div className="flex items-center gap-3 text-xs font-mono">
               <div className="flex flex-col items-end">
                 <span className="opacity-60">{downloadLabel}</span>
-                <span className="font-bold">{downloadProgress}%</span>
+                <span className="font-bold">
+                  {downloadDeterminate ? `${downloadProgress}%` : '…'}
+                </span>
               </div>
-              <div className="w-24 h-2 bg-zinc-200 rounded-full overflow-hidden border border-[#141414]/10">
-                <motion.div 
-                  className="h-full bg-[#141414]" 
-                  initial={{ width: 0 }}
-                  animate={{ width: `${downloadProgress}%` }}
-                />
+              <div className="w-24 h-2 bg-zinc-200 rounded-full overflow-hidden border border-[#141414]/10 relative">
+                {downloadDeterminate ? (
+                  <motion.div 
+                    className="h-full bg-[#141414]" 
+                    initial={{ width: 0 }}
+                    animate={{ width: `${downloadProgress}%` }}
+                  />
+                ) : (
+                  <motion.div
+                    className="h-full bg-[#141414]"
+                    initial={{ width: '35%' }}
+                    animate={{ width: ['35%', '72%', '35%'], opacity: [0.55, 1, 0.55] }}
+                    transition={{ repeat: Infinity, duration: 1.35, ease: 'easeInOut' }}
+                  />
+                )}
               </div>
             </div>
           )}
