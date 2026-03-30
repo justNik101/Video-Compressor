@@ -10,8 +10,9 @@ const crossOriginIsolationHeaders = {
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
+  const base = process.env.VITE_BASE || '/Video-Compressor/';
   return {
-    base: '/Video-Compressor/',
+    base: base,
     plugins: [react(), tailwindcss()],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
