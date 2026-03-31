@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
-import ffmpegWorkerUrl from '@ffmpeg/ffmpeg/worker?url';
 import coreJsUrl from '@ffmpeg/core?url';
 import coreWasmUrl from '@ffmpeg/core/wasm?url';
 import { 
@@ -86,7 +85,6 @@ export default function App() {
 
       const loadPromise = ffmpeg.load(
         {
-          classWorkerURL: ffmpegWorkerUrl,
           coreURL: coreJsUrl,
           wasmURL: coreWasmUrl,
         },
