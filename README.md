@@ -8,7 +8,7 @@ Just github pages: https://justnik101.github.io/Video-Compressor/
 
 This contains everything you need to run your app locally.
 
-View your app in AI Studio: https://ai.studio/apps/3ce194ba-c077-4638-8060-178e1db935ba
+
 
 ## Run Locally
 
