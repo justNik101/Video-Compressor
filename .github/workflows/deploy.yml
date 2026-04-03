@@ -38,7 +38,7 @@ jobs:
       - name: Build
         run: npm run build
         env:
-         VITE_BASE: /${{ github.event.repository.name }}/
+          VITE_BASE: /${{ github.event.repository.name }}/
 
       - name: Add SPA and Pages support files
         run: |
