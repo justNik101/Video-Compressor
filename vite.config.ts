@@ -10,7 +10,9 @@ const crossOriginIsolationHeaders = {
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
-  const base = process.env.VITE_BASE || '/Video-Compressor/';
+  // Default to relative paths so `dist/` can be served locally at `/` (e.g. via server.cmd -s dist).
+  // GitHub Pages workflow overrides this via `--base`.
+  const base = process.env.VITE_BASE ?? './';
   return {
     base: base,
     plugins: [react(), tailwindcss()],
