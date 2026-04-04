@@ -32,6 +32,11 @@ jobs:
           node-version: 20
           cache: "npm"
 
+      - name: Debug Env
+        run: echo "Base path is $VITE_BASE_PATH"
+        env:
+          VITE_BASE_PATH: /${{ github.event.repository.name }}/
+
       - name: Install dependencies
         run: npm ci
 
