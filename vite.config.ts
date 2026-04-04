@@ -9,7 +9,7 @@ const crossOriginIsolationHeaders = {
 };
 
 export default defineConfig(({mode}) => {
-  const env = loadEnv(mode, '.', '');
+  const env = loadEnv(mode, '.', 'VITE_');
   // Default to relative paths so `dist/` can be served locally at `/` (e.g. via server.cmd -s dist).
   // GitHub Pages workflow overrides this via `--base`.
   const base = process.env.VITE_BASE ?? './';
