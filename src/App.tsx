@@ -600,13 +600,27 @@ export default function App() {
                   </div>
                   <div className="flex items-baseline gap-2">
                     <span className="text-2xl font-bold font-mono">
-                      {settings.mode === 'custom' 
-                        ? settings.targetSizeMB 
-                        : Math.round((videoFile.size / (1024 * 1024)) * (settings.mode === 'small' ? 0.3 : settings.mode === 'medium' ? 0.5 : 0.8))}
+                      {(() => {
+                        if (settings.mode === 'custom') return settings.targetSizeMB;
+                        let base = (videoFile.size / (1024 * 1024));
+                        if (videoDuration && settings.trimEnd > settings.trimStart) {
+                          base *= (settings.trimEnd - settings.trimStart) / videoDuration;
+                        }
+                        if (settings.removeAudio) base *= 0.9;
+                        if (settings.scale === '1280:720') base *= 0.75;
+                        if (settings.scale === '854:480') base *= 0.5;
+                        if (settings.scale === '640:360') base *= 0.35;
+                        
+                        let mult = 0.5;
+                        if (settings.mode === 'small') mult = 0.3;
+                        if (settings.mode === 'high') mult = 0.8;
+                        
+                        return Math.max(0.1, Math.round(base * mult * 10) / 10);
+                      })()}
                     </span>
                     <span className="text-xs font-mono font-bold">MB</span>
                     <span className="text-[10px] font-mono opacity-40 italic">
-                      (~{settings.mode === 'small' ? '70' : settings.mode === 'medium' ? '50' : '20'}% reduction)
+                       (Estimated based on selected filters)
                     </span>
                   </div>
                 </div>
