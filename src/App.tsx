@@ -5,7 +5,9 @@ import coreJsUrl from '@ffmpeg/core?url';
 import coreWasmUrl from '@ffmpeg/core/wasm?url';
 import coreMtJsUrl from '@ffmpeg/core-mt?url';
 import coreMtWasmUrl from '@ffmpeg/core-mt/wasm?url';
-import workerMtUrl from '@ffmpeg/core-mt/worker?url';
+// The multithreading worker is served from the local public dist path because the npm package does not officially export it to Vite
+const workerMtUrl = import.meta.env.BASE_URL + 'ffmpeg-core-mt.worker.js';
+
 import { 
   Upload, 
   Settings, 
