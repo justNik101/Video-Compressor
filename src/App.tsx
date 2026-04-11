@@ -3,6 +3,9 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
 import coreJsUrl from '@ffmpeg/core?url';
 import coreWasmUrl from '@ffmpeg/core/wasm?url';
+import coreMtJsUrl from '@ffmpeg/core-mt?url';
+import coreMtWasmUrl from '@ffmpeg/core-mt/wasm?url';
+import workerMtUrl from '@ffmpeg/core-mt/worker?url';
 import { 
   Upload, 
   Settings, 
@@ -26,6 +29,10 @@ interface CompressionSettings {
   crf: number;
   preset: string;
   targetSizeMB: number;
+  trimStart: number;
+  trimEnd: number;
+  removeAudio: boolean;
+  outputFormat: 'mp4' | 'webm' | 'mp3';
 }
 
 export default function App() {
@@ -43,12 +50,20 @@ export default function App() {
     crf: 28,
     preset: 'medium',
     targetSizeMB: 10,
+    trimStart: 0,
+    trimEnd: 0,
+    removeAudio: false,
+    outputFormat: 'mp4',
   });
 
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [downloadDeterminate, setDownloadDeterminate] = useState(true);
   const [downloadLabel, setDownloadLabel] = useState('INITIALIZING...');
   const [isIsolated, setIsIsolated] = useState(true);
+  const [isMultiThreaded, setIsMultiThreaded] = useState(false);
+  const [compressionStartTime, setCompressionStartTime] = useState<number | null>(null);
+  const [eta, setEta] = useState<number | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
 
   const ffmpegRef = useRef<FFmpeg | null>(null);
 
@@ -77,17 +92,30 @@ export default function App() {
 
       ffmpeg.on('progress', ({ progress: p }) => {
         setProgress(Math.round(p * 100));
+        setCompressionStartTime((startTime) => {
+          if (startTime && p > 0 && p < 1) {
+            const elapsed = Date.now() - startTime;
+            const totalTime = elapsed / p;
+            const remaining = totalTime - elapsed;
+            setEta(remaining);
+          } else if (p === 1) {
+            setEta(0);
+          }
+          return startTime;
+        });
       });
 
       const timeoutPromise = new Promise((_, reject) => 
         setTimeout(() => reject(new Error('FFmpeg load timeout (70s)')), 70000)
       );
 
+      const supportsMT = typeof SharedArrayBuffer !== 'undefined' && (navigator.hardwareConcurrency || 0) > 1;
+      setIsMultiThreaded(supportsMT);
+
       const loadPromise = ffmpeg.load(
-        {
-          coreURL: coreJsUrl,
-          wasmURL: coreWasmUrl,
-        },
+        supportsMT
+          ? { coreURL: coreMtJsUrl, wasmURL: coreMtWasmUrl, workerURL: workerMtUrl }
+          : { coreURL: coreJsUrl, wasmURL: coreWasmUrl },
         { signal },
       );
 
@@ -112,30 +140,34 @@ export default function App() {
     }
   };
 
-  // --- Handlers ---
+  const processFile = (file: File) => {
+    if (file.type.startsWith('video/')) {
+      setVideoFile(file);
+      setCompressedUrl(null);
+      setError(null);
+      setProgress(0);
+
+      const video = document.createElement('video');
+      video.preload = 'metadata';
+      video.onloadedmetadata = () => {
+        setVideoDuration(video.duration);
+        const suggestedSize = Math.max(1, Math.round((file.size / (1024 * 1024)) * 0.5));
+        setSettings(prev => ({ 
+          ...prev, 
+          targetSizeMB: suggestedSize, 
+          trimEnd: Math.round(video.duration), 
+          trimStart: 0 
+        }));
+      };
+      video.src = URL.createObjectURL(file);
+    } else {
+      setError('Please select a valid video file.');
+    }
+  };
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      if (file.type.startsWith('video/')) {
-        setVideoFile(file);
-        setCompressedUrl(null);
-        setError(null);
-        setProgress(0);
-
-        // Get video duration
-        const video = document.createElement('video');
-        video.preload = 'metadata';
-        video.onloadedmetadata = () => {
-          setVideoDuration(video.duration);
-          // Suggest a target size (e.g., 50% of original)
-          const suggestedSize = Math.max(1, Math.round((file.size / (1024 * 1024)) * 0.5));
-          setSettings(prev => ({ ...prev, targetSizeMB: suggestedSize }));
-        };
-        video.src = URL.createObjectURL(file);
-      } else {
-        setError('Please select a valid video file.');
-      }
-    }
+    if (file) processFile(file);
   };
 
   const compressVideo = async () => {
@@ -144,63 +176,76 @@ export default function App() {
     setCompressing(true);
     setError(null);
     setProgress(0);
+    setCompressionStartTime(Date.now());
+    setEta(null);
 
     try {
       if (settings.mode === 'custom' && !videoDuration) {
         throw new Error('Video metadata not loaded. Please wait a moment and try again.');
       }
       const inputName = 'input.mp4';
-      const outputName = 'output.mp4';
+      const outputName = `output.${settings.outputFormat}`;
 
       await ffmpeg.writeFile(inputName, await fetchFile(videoFile));
 
-      const args = ['-i', inputName];
+      const args = [];
+      if (settings.trimStart > 0) args.push('-ss', settings.trimStart.toString());
+      if (settings.trimEnd > 0 && videoDuration && settings.trimEnd < videoDuration) args.push('-to', settings.trimEnd.toString());
+      args.push('-i', inputName);
 
-      // Video filters: scale
-      if (settings.scale !== 'original') {
-        args.push('-vf', `scale=${settings.scale}:force_original_aspect_ratio=decrease`);
+      if (settings.outputFormat !== 'mp3') {
+        if (settings.scale !== 'original') {
+          args.push('-vf', `scale=${settings.scale}:force_original_aspect_ratio=decrease`);
+        }
+        
+        if (settings.outputFormat === 'webm') {
+          args.push('-c:v', 'libvpx-vp9');
+          args.push('-row-mt', '1');
+        } else {
+          args.push('-c:v', 'libx264');
+          args.push('-pix_fmt', 'yuv420p');
+          args.push('-preset', settings.preset);
+          args.push('-movflags', '+faststart');
+        }
+
+        if (settings.mode === 'custom' && videoDuration) {
+          const targetBits = settings.targetSizeMB * 1024 * 1024 * 8;
+          const totalBitrate = targetBits / videoDuration;
+          const audioBitrate = settings.removeAudio ? 0 : 128000;
+          const videoBitrate = Math.max(100000, totalBitrate - audioBitrate);
+          
+          args.push('-b:v', `${Math.round(videoBitrate)}`);
+          args.push('-maxrate', `${Math.round(videoBitrate * 1.5)}`);
+          args.push('-bufsize', `${Math.round(videoBitrate * 2)}`);
+        } else {
+          let crf = settings.crf;
+          if (settings.mode === 'small') crf = 32;
+          if (settings.mode === 'medium') crf = 28;
+          if (settings.mode === 'high') crf = 23;
+          args.push('-crf', crf.toString());
+        }
       }
-      
-      // Video codec
-      args.push('-c:v', 'libx264');
-      args.push('-pix_fmt', 'yuv420p');
-      args.push('-preset', settings.preset);
-      args.push('-movflags', '+faststart');
 
-      if (settings.mode === 'custom' && videoDuration) {
-        // Calculate bitrate for target size: Bitrate = (Size * 8) / Duration
-        // Target size in bits = MB * 1024 * 1024 * 8
-        const targetBits = settings.targetSizeMB * 1024 * 1024 * 8;
-        const totalBitrate = targetBits / videoDuration;
-        
-        // Subtract audio bitrate (approx 128kbps)
-        const videoBitrate = Math.max(100000, totalBitrate - 128000);
-        
-        args.push('-b:v', `${Math.round(videoBitrate)}`);
-        args.push('-maxrate', `${Math.round(videoBitrate * 1.5)}`);
-        args.push('-bufsize', `${Math.round(videoBitrate * 2)}`);
+      if (settings.outputFormat === 'mp3') {
+        args.push('-q:a', '0', '-map', 'a');
+      } else if (settings.removeAudio) {
+        args.push('-an');
       } else {
-        // Quality based modes
-        let crf = settings.crf;
-        if (settings.mode === 'small') crf = 32;
-        if (settings.mode === 'medium') crf = 28;
-        if (settings.mode === 'high') crf = 23;
-        
-        args.push('-crf', crf.toString());
+        args.push('-c:a', settings.outputFormat === 'webm' ? 'libopus' : 'aac');
+        args.push('-b:a', '128k');
       }
 
-      // Audio settings
-      args.push('-c:a', 'aac');
-      args.push('-b:a', '128k');
-      
-      // Output
       args.push(outputName);
 
       await ffmpeg.exec(args);
 
       const data = await ffmpeg.readFile(outputName);
-      // `data` can be backed by a SharedArrayBuffer; using the Uint8Array avoids BlobPart typing issues.
-      const url = URL.createObjectURL(new Blob([data as Uint8Array], { type: 'video/mp4' }));
+      
+      let mimeType = 'video/mp4';
+      if (settings.outputFormat === 'webm') mimeType = 'video/webm';
+      if (settings.outputFormat === 'mp3') mimeType = 'audio/mp3';
+      
+      const url = URL.createObjectURL(new Blob([data as Uint8Array], { type: mimeType }));
       setCompressedUrl(url);
     } catch (err) {
       console.error('Compression error:', err);
@@ -259,8 +304,16 @@ export default function App() {
             </div>
           )}
           {loaded && (
-            <div className="text-xs font-mono text-emerald-600 bg-emerald-50 px-2 py-1 border border-emerald-200 rounded-sm">
-              SYSTEM_READY
+            <div className="flex gap-2">
+              {isMultiThreaded ? (
+                <div className="text-xs font-mono text-emerald-600 bg-emerald-50 px-2 py-1 border border-emerald-200 rounded-sm">
+                  MT_ENGINE_ACTIVE
+                </div>
+              ) : (
+                <div className="text-xs font-mono text-amber-600 bg-amber-50 px-2 py-1 border border-amber-200 rounded-sm">
+                  COMPATIBILITY_MODE
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -281,13 +334,23 @@ export default function App() {
             
             <div className="p-8">
               {!videoFile ? (
-                <label className="group relative flex flex-col items-center justify-center border-2 border-dashed border-[#141414] rounded-lg p-12 cursor-pointer hover:bg-zinc-50 transition-all">
+                <label 
+                  onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                  onDragLeave={(e) => { e.preventDefault(); setIsDragging(false); }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setIsDragging(false);
+                    const file = e.dataTransfer.files?.[0];
+                    if (file) processFile(file);
+                  }}
+                  className={`group relative flex flex-col items-center justify-center border-2 border-dashed ${isDragging ? 'border-emerald-500 bg-emerald-50' : 'border-[#141414] hover:bg-zinc-50'} rounded-lg p-12 cursor-pointer transition-all`}
+                >
                   <input type="file" accept="video/*" className="hidden" onChange={handleFileChange} />
-                  <div className="bg-[#141414] p-4 rounded-full mb-4 group-hover:scale-110 transition-transform">
+                  <div className={`${isDragging ? 'bg-emerald-500' : 'bg-[#141414]'} p-4 rounded-full mb-4 group-hover:scale-110 transition-transform`}>
                     <Upload className="w-8 h-8 text-[#E4E3E0]" />
                   </div>
-                  <p className="text-lg font-bold mb-1">Click to upload or drag and drop</p>
-                  <p className="text-sm opacity-60 font-mono">MP4, WebM, MOV (Max 50MB recommended)</p>
+                  <p className="text-lg font-bold mb-1">{isDragging ? 'Drop video here' : 'Click to upload or drag and drop'}</p>
+                  <p className="text-sm opacity-60 font-mono">MP4, WebM, MOV</p>
                 </label>
               ) : (
                 <div className="space-y-4">
@@ -459,6 +522,68 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Output Format & Audio */}
+              <div className="space-y-3">
+                <div className="flex justify-between">
+                  <label className="text-xs font-mono uppercase opacity-50 block italic font-serif">Output_Format</label>
+                  <label className="text-xs font-mono flex items-center gap-2 cursor-pointer">
+                    <input 
+                      type="checkbox" 
+                      checked={settings.removeAudio} 
+                      onChange={(e) => setSettings({ ...settings, removeAudio: e.target.checked })} 
+                      className="accent-[#141414]"
+                    />
+                    <span className="opacity-70">Mute / Remove Audio</span>
+                  </label>
+                </div>
+                <div className="flex gap-2">
+                  {[{ id: 'mp4', label: 'MP4' }, { id: 'webm', label: 'WebM' }, { id: 'mp3', label: 'MP3' }].map((f) => (
+                    <button
+                      key={f.id}
+                      onClick={() => setSettings({ ...settings, outputFormat: f.id as any })}
+                      className={`flex-1 p-2 text-[10px] font-mono border uppercase tracking-tighter transition-all ${
+                        settings.outputFormat === f.id 
+                          ? 'bg-[#141414] text-[#E4E3E0] border-[#141414]' 
+                          : 'border-zinc-200 hover:border-[#141414]'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Trimming */}
+              {videoFile && videoDuration && (
+                <div className="space-y-3">
+                  <label className="text-xs font-mono uppercase opacity-50 block italic font-serif">Trim_Video (Seconds)</label>
+                  <div className="flex items-center gap-4">
+                    <div className="flex-1 space-y-1">
+                      <div className="text-[10px] font-mono opacity-60">Start Time</div>
+                      <input 
+                        type="number" 
+                        min="0" 
+                        max={settings.trimEnd || videoDuration}
+                        value={settings.trimStart}
+                        onChange={(e) => setSettings({ ...settings, trimStart: parseInt(e.target.value) || 0 })}
+                        className="w-full bg-zinc-50 border border-zinc-200 p-2 text-sm font-mono"
+                      />
+                    </div>
+                    <div className="flex-1 space-y-1">
+                      <div className="text-[10px] font-mono opacity-60">End Time</div>
+                      <input 
+                        type="number" 
+                        min={settings.trimStart} 
+                        max={Math.round(videoDuration)}
+                        value={settings.trimEnd}
+                        onChange={(e) => setSettings({ ...settings, trimEnd: parseInt(e.target.value) || Math.round(videoDuration) })}
+                        className="w-full bg-zinc-50 border border-zinc-200 p-2 text-sm font-mono"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Estimated Size */}
               {videoFile && (
                 <div className="p-4 bg-zinc-50 border border-zinc-200 rounded-sm space-y-3">
@@ -490,7 +615,9 @@ export default function App() {
                 {compressing ? (
                   <div className="space-y-4">
                     <div className="flex justify-between items-end mb-1">
-                      <span className="text-xs font-mono animate-pulse">COMPRESSING_DATA...</span>
+                      <span className="text-xs font-mono animate-pulse">
+                        {eta !== null ? `ETA: ${Math.max(0, Math.round(eta / 1000))}s` : 'STARTING_ENGINE...'}
+                      </span>
                       <span className="text-xl font-bold font-mono">{progress}%</span>
                     </div>
                     <div className="w-full h-4 bg-zinc-100 border border-[#141414] overflow-hidden">
